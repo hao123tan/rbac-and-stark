@@ -1,0 +1,5 @@
+<ol class="breadcrumb no-radius no-margin" style="border-bottom: 1px solid #ddd;">
+    {% for item in url_record %}
+        <li><a href={{ item.url }}>{{ item.title }}</a></li>
+    {% endfor %}
+</ol>

@@ -1,0 +1,340 @@
+rbac组件的使用文档
+
+1.将rbac组件拷贝到新的项目中
+
+2.将rbac/migrations目录中的数据库迁移记录删除
+
+3.进行业务开发
+    1.业务开发之时，业务中的用户表要继承rbac的业务表
+        class UserInfo(models.Model):
+            """
+            用户表
+            """
+            name = models.CharField(verbose_name='用户名', max_length=32)
+            password = models.CharField(verbose_name='密码', max_length=64)
+            email = models.CharField(verbose_name='邮箱', max_length=32)
+            roles = models.ManyToManyField(verbose_name='拥有的所有角色', to=Role, blank=True)这个role不要加引号
+
+            def __str__(self):
+                return self.name
+
+            class Meta:
+                # django以后再做数据库迁移时就不再为userInfo创建相关的表
+                # 此类可以当做父类继承
+                abstract = True
+
+        class UserInfo(RbacUserInfo):
+            '''
+            用户表
+            '''
+
+            phone = models.CharField(verbose_name='联系方式',max_length=32)
+            level_choices = ((1,'T1'),(2,'T2'),(3,'T3'))
+            level = models.IntegerField(verbose_name='级别',choices=level_choices)
+            depart = models.ForeignKey(verbose_name='部门',to=Department, on_delete=models.CASCADE)
+
+            def __str__(self):
+                return self.name
+
+         优点：所有的信息都放在一张表中
+         缺点：在Rbac所有关于用户表的操作不可以使用了
+
+         ---注意：rbac中两处使用了用户表
+                - 用户管理【删除不用】
+                - 权限分配时的用户列表【读取业务表中的用户表】
+                因此在组件的迁移后 需要改动
+        对于rbac中的代码修改
+            在rbac的url里面的用户信息进行覆盖
+            在权限分配之时，通过读取配置文件来进行制定用户表
+
+    2.通过读取配置文件来制定用户表
+        #业务中的用户表
+        RBAC_USER_MODEL_CLASS = 'app01.models.UserInfo'
+
+    3.业务逻辑开发
+        1.将所有的路由都设置一个name
+            urlpatterns = [
+                url(r'^admin/', admin.site.urls),
+                url(r'^login/$', account.login, name='login'),
+                url(r'^logout/$', account.logout, name='logout'),
+
+                url(r'^index/$', account.index, name='index'),
+
+                url(r'^user/list/$', user.user_list, name='user_list'),
+                url(r'^user/add/$', user.user_add, name='user_add'),
+                url(r'^user/edit/(?P<pk>\d+)/$', user.user_edit, name='user_edit'),
+                url(r'^user/del/(?P<pk>\d+)/$', user.user_del, name='user_del'),
+                url(r'^user/reset/password/(?P<pk>\d+)/$', user.user_reset_pwd, name='user_reset_pwd'),
+
+                url(r'^host/list/$', host.host_list, name='host_list'),
+                url(r'^host/add/$', host.host_add, name='host_add'),
+                url(r'^host/edit/(?P<pk>\d+)/$', host.host_edit, name='host_edit'),
+                url(r'^host/del/(?P<pk>\d+)/$', host.host_del, name='host_del'),
+
+                url(r'^rbac/', include(('rbac.urls', 'rbac'), namespace='rbac')),
+
+            ]
+            用于反向生成url和粒度控制到按钮级别的权限控制
+
+    4.权限信息的录入
+        1.#必须设置namespace
+        在根路由中加上url(r'^rbac/', include(('rbac.urls', 'rbac'), namespace='rbac')),
+        2.根据rbac提供的地址进行操作
+            ----menu_list
+            ----role_list
+            ----distribute/permissions/
+
+    5.编写用户登录的逻辑
+        def login(request):
+            if request.method == 'GET':
+                return render(request,'login.html')
+
+            user = request.POST.get('username')
+            pwd = request.POST.get('password')
+
+            user_object = models.UserInfo.objects.filter(name=user,password=pwd).first()
+            if not user_object:
+                return render(request,'login.html',{'error':'用户名或者密码错误'})
+
+            #用户权限信息的初始化
+            init_permission(user_object,request)
+
+            return redirect('index')
+
+        注意要进行权限初始化
+        相关配置(settings):
+            权限和菜单的session.key
+                #权限在session中存储的key
+                PERMISSION_SESSION_KEY = "luffy_permission_url_list_key"
+                #菜单在session中存储的key
+                MENU_SESSION_KEY = "luffy_permission_menu_key"
+
+    6.首页的逻辑
+        def index(request):
+            return render(request,'index.html')
+        注意 要在自定义中间件设置一个权限校验的
+            在setting设置一个需要登录但无需校验的
+                #需要登录但无需权限的URL
+                    NO_PERMISSION_LIST =[
+                        '/index/',
+                        '/logout/'
+                    ]
+    7.中间件权限校验
+        for url in settings.NO_PERMISSION_LIST:
+            #主要给需要登录 但是无需校验的URL登录的方式
+            if re.match(url, request.path_info):
+                request.current_select_permission = 0
+                request.url_record = url_record
+                return None
+        还要设置白名单（无需登录就可访问）自动发现URL也可以和白名单设置到一起
+
+    8.控制粒度到按钮
+        {% extends 'layout.html' %}
+        {% load rbac %}
+
+        {% block content %}
+
+            <div class="luffy-container">
+                <div class="btn-group" style="margin: 5px 0">
+                    {% if request|has_permission:'host_add' %}
+                        <a class="btn btn-default" href="{% memory_url request 'host_add' %}">
+                            <i class="fa fa-plus-square" aria-hidden="true"></i> 添加主机
+                        </a>
+                    {% endif %}
+                </div>
+                <table class="table table-bordered table-hover">
+                    <thead>
+                    <tr>
+                        <th>主机名</th>
+                        <th>IP</th>
+                        <th>部门</th>
+                        <th>操作</th>
+
+                    </tr>
+                    </thead>
+                    <tbody>
+                    {% for row in host_queryset %}
+                        <tr>
+                            <td>{{ row.hostname }}</td>
+                            <td>{{ row.ip }}</td>
+                            <td>{{ row.depart.title }}</td>
+                            {% if request|has_permission:'host_edit' or request|has_permission:'host_del' %}
+                                <td>
+                                    {% if request|has_permission:'host_edit' %}
+                                        <a style="color: #333333;" href="{% memory_url request 'host_edit' pk=row.id %}">编辑
+                                            <i class="fa fa-edit" aria-hidden="true"></i></a>
+                                    {% endif %}
+
+                                    {% if request|has_permission:'host_del' %}
+                                        |<a style="color: #d9534f;" href="{% memory_url request 'host_del' pk=row.id %}">删除<i
+                                            class="fa fa-trash-o"></i></a>
+                                    {% endif %}
+
+                                </td>
+                            {% endif %}
+
+                        </tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+
+        {% endblock %}
+
+
+总结，目的是希望在任意系统中应用权限系统
+    -用户登录+用户首页+用户注销 业务逻辑
+    -项目业务逻辑开发
+        注意：开发时候灵活的取设置layout.html 两个inclusion_tag
+         如果要使用RBAC中的模板，则需要将模板中的导航条+菜单去掉，在上线之前再拿回来
+         {% multi_menu request %} {% breadcrumb request %}
+    -权限信息的录入
+    -配置文件
+        INSTALLED_APPS = [
+            ....
+            'rbac.apps.RbacConfig',
+        ]
+
+        MIDDLEWARE = [
+            ....
+            'rbac.middlewares.rbac.RbacMiddleware'
+        ]
+
+        #业务中的用户表
+        RBAC_USER_MODEL_CLASS = 'app01.models.UserInfo'
+
+        #权限在session中存储的key
+        PERMISSION_SESSION_KEY = "luffy_permission_url_list_key"
+        #菜单在session中存储的key
+        MENU_SESSION_KEY = "luffy_permission_menu_key"
+        #白名单和自动发现都可以使用
+        VALID_URL_LIST = [
+            '/login/',
+            '/admin/.*',
+        ]
+
+        #需要登录但无需权限的URL
+        NO_PERMISSION_LIST =[
+            '/index/',
+            '/logout/'
+        ]
+
+
+
+
+3.进行业务开发
+    1.在进行业务开发时，对于用户表使用O2O将用户表拆分到两种表中
+        class UserInfo(models.Model):
+           '''
+           用户表
+           '''
+           user = models.OneToOneField(verbose_name='用户',to=RbacUserInfo, on_delete=models.CASCADE)
+           phone = models.CharField(verbose_name='联系方式',max_length=32)
+           level_choices = ((1,'T1'),(2,'T2'),(3,'T3'))
+           level = models.IntegerField(verbose_name='级别',choices=level_choices)
+           depart = models.ForeignKey(verbose_name='部门',to=Department, on_delete=models.CASCADE)
+
+           def __str__(self):
+                return self.user.name
+
+      缺点：用户表数据的分散，修改用户信息的时候需要跨表
+      优点：利用上rbac中的用户管理的功能（功能只是不全）；可以简单让两张表关联起来的
+
+    2.用户表整合在一张表中（推荐方式，维护比较便捷）
+    class UserInfo(models.Model):
+        """
+        用户表
+        """
+        name = models.CharField(verbose_name='用户名', max_length=32)
+        password = models.CharField(verbose_name='密码', max_length=64)
+        email = models.CharField(verbose_name='邮箱', max_length=32)
+        roles = models.ManyToManyField(verbose_name='拥有的所有角色', to=Role, blank=True)这个role不要加引号
+
+        def __str__(self):
+            return self.name
+
+        class Meta:
+            # django以后再做数据库迁移时就不再为userInfo创建相关的表
+            # 此类可以当做父类继承
+            abstract = True
+
+    class UserInfo(RbacUserInfo):
+        '''
+        用户表
+        '''
+
+        phone = models.CharField(verbose_name='联系方式',max_length=32)
+        level_choices = ((1,'T1'),(2,'T2'),(3,'T3'))
+        level = models.IntegerField(verbose_name='级别',choices=level_choices)
+        depart = models.ForeignKey(verbose_name='部门',to=Department, on_delete=models.CASCADE)
+
+        def __str__(self):
+            return self.name
+
+     优点：所有的信息都放在一张表中
+     缺点：在Rbac所有关于用户表的操作不可以使用了
+
+     ---注意：rbac中两处使用了用户表
+            - 用户管理【删除不用】
+            - 权限分配时的用户列表【读取业务表中的用户表】
+            因此在组件的迁移后 需要改动
+    对于rbac中的代码修改
+        在rbac的url里面的用户信息进行覆盖
+        在权限分配之时，通过读取配置文件来进行制定用户表
+
+4.业务开发
+    - 用户表的增删改查
+    - 主机表的增删改查
+
+    感受：编写业务功能时，出现了大量的拷贝
+
+    如果要使用RBAC中的模板，则需要将模板中的导航条+菜单去掉，在上线之前再拿回来
+    {% multi_menu request %} {% breadcrumb request %}
+
+5.权限的应用
+    5.1 菜单和导航条的加回
+    5.2 中间件的应用
+        setting里面设置
+            1.
+                MIDDLEWARE = [
+                'rbac.middleware.rbac.RbacMiddleware'
+                ]
+                要在中间件里面设置好
+            2.白名单处理
+                VALID_URL_LIST = [
+                    '/login/',
+                    '/admin/.*'
+                    ]
+                这个白名单既可以做白名单 也可以做自动寻找url里面的去除白名单里面的url
+            3.权限初始化
+                #权限在session中存储的key
+                PERMISSION_SESSION_KEY = "luffy_permission_url_list_key"
+                #菜单在session中存储的key
+                MENU_SESSION_KEY = "luffy_permission_menu_key"
+    5.4 用户登录的逻辑
+        写完用户登录逻辑，对于index,login,logout页面这三个页面的权限是否用分配呢？ 应该不用
+        默认用户登录后，都能访问index
+        #需要登录但无需权限的URL
+            NO_PERMISSION_LIST =[
+                '/index/',
+                '/logout/'
+            ]
+        current_url = request.path_info
+        for valid_url in settings.VALID_URL_LIST:
+            if re.match(valid_url, current_url):
+                # 白名单中的URL无需权限验证即可访问
+                return None
+        permission_dict = request.session.get(settings.PERMISSION_SESSION_KEY)
+        if not permission_dict:
+            return HttpResponse('未获取到用户权限信息，请登录！')
+
+        url_record = [
+            {'title': '首页', 'url': '#'}
+        ]
+        for url in settings.NO_PERMISSION_LIST:
+            if re.match(url, request.path_info):
+                request.current_select_permission = 0
+                request.url_record = url_record
+                # 白名单中的URL无需权限验证即可访问
+                return None
+
